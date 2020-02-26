@@ -6,8 +6,10 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
+)
 
 //
 // example to show how to declare the arguments
@@ -22,8 +24,32 @@ type ExampleReply struct {
 	Y int
 }
 
-// Add your RPC definitions here.
+type Command int
 
+const (
+	MapOp = iota
+	ReduceOp
+	NoOp
+)
+
+func (d Command) String() string {
+	return [...]string{"MapOp", "ReduceOp", "NoOp"}[d]
+}
+
+type TaskRequest struct {
+	WorkPid int
+}
+
+// If Cmd == Map: args = [mapTaskID, mapParameter], outputFiles = a list of intermediate files
+// If Cmd == Reduce: args = [reduceTaskID, a list of intermediate files...], outputFiles = [output-file]
+
+type TaskReply struct {
+	Cmd         Command
+	Args        []string
+	OutputFiles []string // Reduce task only has a single output file
+}
+
+// Add your RPC definitions here.
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.
