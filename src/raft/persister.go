@@ -53,8 +53,8 @@ func (ps *Persister) RaftStateSize() int {
 func (ps *Persister) SaveStateAndSnapshot(state []byte, snapshot []byte) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	ps.raftstate = state
 	ps.snapshot = snapshot
+	ps.raftstate = state
 }
 
 func (ps *Persister) ReadSnapshot() []byte {
