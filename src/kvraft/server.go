@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"os"
@@ -122,11 +123,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		}
 
 		action := fmt.Sprintf("Reply Get key=[%s] val=[%s] for clerk %d cmdseq %d after raft index %d and term %d\n", args.Key, reply.Value, args.ClerkId, args.CmdSeq, kv.lastAppliedRaftIndex, kv.lastAppliedRaftTerm)
-		if Log == 1 {
-			if _, err := kv.reqLogFile.WriteString(action); err != nil {
-				panic(fmt.Sprintf("Can not write to reqLogFile for Server %d", kv.me))
-			}
-		}
+		kv.WriteReqLog(action)
 
 		kv.mu.RUnlock()
 		kv.log("Release the KV server lock in Get to submit")
@@ -137,6 +134,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	var index, term int
 	var isLeader bool
+	if kv.maxraftstate < kv.persister.RaftStateSize() {
+		// If this server is leader, it might be in the minority partition.
+		// So that the appended logs can not be committed and snapshoted.
+		// Reject the request to avoid overloading the logs
+		reply.Err = ErrWrongLeader
+	}
 	if index, term, isLeader = kv.rf.Start(Op{Key: args.Key, Op: "Get", ClerkId: args.ClerkId, CmdSeq: args.CmdSeq}); !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -156,11 +159,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			}
 
 			action := fmt.Sprintf("Reply Get key=[%s] val=[%s] for clerk %d cmdseq %d after raft index %d and term %d\n", args.Key, reply.Value, args.ClerkId, args.CmdSeq, kv.lastAppliedRaftIndex, kv.lastAppliedRaftTerm)
-			if Log == 1 {
-				if _, err := kv.reqLogFile.WriteString(action); err != nil {
-					panic(fmt.Sprintf("Can not write to reqLogFile for Server %d", kv.me))
-				}
-			}
+			kv.WriteReqLog(action)
 			kv.mu.RUnlock()
 			kv.log("Cmd for clerk %d and cmdSeq %d has committed. RUnlock and return", args.ClerkId, args.CmdSeq)
 			return
@@ -202,11 +201,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = OK
 
 		action := fmt.Sprintf("Reply %s key=[%s] val=[%s] for clerk %d cmdseq %d after raft index %d and term %d\n", args.Op, args.Key, args.Value, args.ClerkId, args.CmdSeq, kv.lastAppliedRaftIndex, kv.lastAppliedRaftTerm)
-		if Log == 1 {
-			if _, err := kv.reqLogFile.WriteString(action); err != nil {
-				panic(fmt.Sprintf("Can not write to reqLogFile for Server %d", kv.me))
-			}
-		}
+		kv.WriteReqLog(action)
 
 		kv.mu.RUnlock()
 		kv.log("Release the KV server lock in PutAppend for duplicates")
@@ -214,6 +209,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	kv.mu.RUnlock()
 	kv.log("RUnlock the KV server lock in PutAppend before submit")
+
+	if kv.maxraftstate < kv.persister.RaftStateSize() {
+		// If this server is leader, it might be in the minority partition.
+		// So that the appended logs can not be committed and snapshoted.
+		// Reject the request to avoid overloading the logs
+		reply.Err = ErrWrongLeader
+	}
 
 	var index, term int
 	var isLeader bool
@@ -229,11 +231,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		if lastAppliedSeq, ok := kv.duplicatedTable[args.ClerkId]; ok && args.CmdSeq <= lastAppliedSeq {
 			reply.Err = OK
 			action := fmt.Sprintf("Reply %s key=[%s] val=[%s] for clerk %d cmdseq %d after raft index %d and term %d\n", args.Op, args.Key, args.Value, args.ClerkId, args.CmdSeq, kv.lastAppliedRaftIndex, kv.lastAppliedRaftTerm)
-			if Log == 1 {
-				if _, err := kv.reqLogFile.WriteString(action); err != nil {
-					panic(fmt.Sprintf("Can not write to reqLogFile for Server %d", kv.me))
-				}
-			}
+			kv.WriteReqLog(action)
 			kv.mu.RUnlock()
 			kv.log("Cmd for clerk %d and cmdSeq %d has committed. RUnlock and return", args.ClerkId, args.CmdSeq)
 			return
@@ -312,9 +310,35 @@ func (kv *KVServer) applyOpWithLock(op *Op) {
 	} else {
 		panic("Unrecognized op type")
 	}
+	kv.WriteCommitLog(fmt.Sprintf("\t%s\n", action))
+}
+
+func (kv *KVServer) WriteCommitLog(msg string) {
 	if Log == 1 {
-		if _, err := kv.commitLogFile.WriteString(fmt.Sprintf("\t%s\n", action)); err != nil {
-			panic(fmt.Sprintf("Can not write to commitLogFile for Server %d", kv.me))
+		if _, err := kv.commitLogFile.WriteString(msg); err != nil {
+			panic(fmt.Sprintf("Can not write to commitLogFile for Server %d with err msg %s", kv.me, err.Error()))
+		}
+	}
+}
+
+func (kv *KVServer) WriteReqLog(msg string) {
+	if Log == 1 {
+		if _, err := kv.reqLogFile.WriteString(msg); err != nil {
+			panic(fmt.Sprintf("Can not write to reqLogFile for Server %d with err msg %s", kv.me, err.Error()))
+		}
+	}
+}
+
+func (kv *KVServer) OpenLogFiles() {
+	if Log == 1 {
+		var err error
+		commitLogPath := fmt.Sprintf(commitLogFormat, kv.me)
+		reqLogPath := fmt.Sprintf(reqLogFormath, kv.me)
+		if kv.commitLogFile, err = os.OpenFile(commitLogPath, os.O_APPEND|os.O_WRONLY, os.ModeAppend); err != nil {
+			panic(fmt.Sprintf("Fail to open %s with err %s", commitLogPath, err.Error()))
+		}
+		if kv.reqLogFile, err = os.OpenFile(reqLogPath, os.O_APPEND|os.O_WRONLY, os.ModeAppend); err != nil {
+			panic(fmt.Sprintf("Fail to open %s with err %s", reqLogPath, err.Error()))
 		}
 	}
 }
@@ -354,18 +378,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.lastAppliedRaftTerm = 0
 	kv.latestTerm = 0
 	kv.persister = persister
-
-	if Log == 1 {
-		var err error
-		commitLogPath := fmt.Sprintf(commitLogFormat, kv.me)
-		reqLogPath := fmt.Sprintf(reqLogFormath, kv.me)
-		if kv.commitLogFile, err = os.OpenFile(commitLogPath, os.O_APPEND|os.O_WRONLY, os.ModeAppend); err != nil {
-			panic(fmt.Sprintf("Fail to open %s with err %s", commitLogPath, err.Error()))
-		}
-		if kv.reqLogFile, err = os.OpenFile(reqLogPath, os.O_APPEND|os.O_WRONLY, os.ModeAppend); err != nil {
-			panic(fmt.Sprintf("Fail to open %s with err %s", reqLogPath, err.Error()))
-		}
-	}
+	kv.OpenLogFiles()
 
 	// You may need initialization code here.
 	go func() {
@@ -378,41 +391,52 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			kv.log("Grab the KV server lock in applied routine")
 			// fmt.Printf("Grab the KV server lock in applied routine (Raft Server %d)\n", kv.rf.Me())
 			if appliedMsg.CommandIndex == 0 {
-				kv.lastAppliedRaftTerm = appliedMsg.Term
-				kv.lastAppliedRaftIndex = appliedMsg.CommandIndex
-				kv.mu.Unlock()
-				kv.cond.Broadcast()
-				kv.log("Release the KV server lock in applied routine and make the broadcast")
-				// fmt.Printf("Release the KV server lock in applied routine (Raft Server %d)\n", kv.rf.Me())
-				continue // the first empty log
-			}
-			op := appliedMsg.Command.(Op)
-			kv.log("Receive Committed Op from ClerkId %d, CmdSeq %d, Raft Index %d and Term %d", op.ClerkId, op.CmdSeq, appliedMsg.CommandIndex, appliedMsg.Term)
-			if Log == 1 {
-				if _, err := kv.commitLogFile.WriteString(fmt.Sprintf("%d) Raft Term: %d, ClerkId: %d, CmdSeq: %d\n", appliedMsg.CommandIndex, appliedMsg.Term, op.ClerkId, op.CmdSeq)); err != nil {
-					panic(fmt.Sprintf("Can not write to commitLogFile for Server %d with err msg %s", kv.me, err.Error()))
+				// Ignore the first empty raft log
+			} else if !appliedMsg.CommandValid {
+				// Now it implies for a snapshot, load the latest state from persister.
+				// Note: the persister state can not be staled as we holding rf.mu lock.
+				// the snapshot raft index and term will be updated later to lastAppliedRaftIndex/term
+				snapshotData, lastIncludedIndex, lastIncludedTerm := kv.rf.ReadSnapshot()
+				if lastIncludedIndex != appliedMsg.CommandIndex {
+					panic(fmt.Sprintf("Unmatched snapshot index (%d) with raft index (%d)", lastIncludedIndex, appliedMsg.CommandIndex))
 				}
-			}
 
-			if appliedCmdSeq, ok := kv.duplicatedTable[op.ClerkId]; !ok {
-				if op.CmdSeq != 0 {
+				if lastIncludedTerm != appliedMsg.Term {
+					panic(fmt.Sprintf("Unmatched snapshot term (%d) with raft term (%d)", lastIncludedTerm, appliedMsg.Term))
+				}
+
+				d := labgob.NewDecoder(bytes.NewBuffer(snapshotData))
+
+				if err := d.Decode(&kv.state); err != nil {
+					panic(fmt.Sprintf("Fail to decode kv state due to err msg %s", err.Error()))
+				}
+				if err := d.Decode(&kv.duplicatedTable); err != nil {
+					panic(fmt.Sprintf("Fail to decode duplicated table due to err msg %s", err.Error()))
+				}
+
+			} else if op, ok := appliedMsg.Command.(Op); ok {
+
+				kv.WriteCommitLog(fmt.Sprintf("%d) Raft Term: %d, ClerkId: %d, CmdSeq: %d\n", appliedMsg.CommandIndex, appliedMsg.Term, op.ClerkId, op.CmdSeq))
+				kv.log("Receive Committed Op from ClerkId %d, CmdSeq %d, Raft Index %d and Term %d", op.ClerkId, op.CmdSeq, appliedMsg.CommandIndex, appliedMsg.Term)
+
+				if appliedCmdSeq, ok := kv.duplicatedTable[op.ClerkId]; !ok {
+					if op.CmdSeq != 0 {
+						panic(fmt.Sprintf("Clerk %d has sent Request %d before committing previous requests.", op.ClerkId, op.CmdSeq))
+					}
+					kv.applyOpWithLock(&op)
+				} else if op.CmdSeq <= appliedCmdSeq {
+					kv.log("Ignore duplicated request (clerkID: %d, cmdSeq: %d)", op.ClerkId, op.CmdSeq)
+					kv.WriteCommitLog("\tDuplicates")
+				} else if op.CmdSeq == appliedCmdSeq+1 {
+					kv.applyOpWithLock(&op)
+				} else {
 					panic(fmt.Sprintf("Clerk %d has sent Request %d before committing previous requests.", op.ClerkId, op.CmdSeq))
 				}
-				kv.applyOpWithLock(&op)
-			} else if op.CmdSeq <= appliedCmdSeq {
-				kv.log("Ignore duplicated request (clerkID: %d, cmdSeq: %d)", op.ClerkId, op.CmdSeq)
-				if Log == 1 {
-					if _, err := kv.commitLogFile.WriteString("\tDuplicates\n"); err != nil {
-						panic(fmt.Sprintf("Can not write to commitLogFile for Server %d", kv.me))
-					}
-				}
-			} else if op.CmdSeq == appliedCmdSeq+1 {
-				kv.applyOpWithLock(&op)
 			} else {
-				panic(fmt.Sprintf("Clerk %d has sent Request %d before committing previous requests.", op.ClerkId, op.CmdSeq))
+				panic("Wrong recognized cmd op type...")
 			}
-			kv.lastAppliedRaftTerm = appliedMsg.Term
 			kv.lastAppliedRaftIndex = appliedMsg.CommandIndex
+			kv.lastAppliedRaftTerm = appliedMsg.Term
 			kv.mu.Unlock()
 			kv.cond.Broadcast()
 			kv.log("Release the KV server lock in applied routine and make the broadcast")
@@ -438,5 +462,29 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			time.Sleep(100 * time.Millisecond)
 		}
 	}()
+
+	go func() {
+		// Periodically examine thr persisted states and save the snapshot if necessary.
+		for {
+			if prevStateSize := kv.persister.RaftStateSize(); 0 < kv.maxraftstate && kv.maxraftstate < prevStateSize {
+				w := new(bytes.Buffer)
+				e := labgob.NewEncoder(w)
+
+				kv.mu.RLock()
+				e.Encode(kv.state)
+				e.Encode(kv.duplicatedTable)
+				lastIncludedIndex := kv.lastAppliedRaftIndex
+				lastIncludedTerm := kv.lastAppliedRaftTerm
+				kv.mu.RUnlock()
+
+				data := w.Bytes()
+
+				kv.rf.SaveSnapshot(data, lastIncludedIndex, lastIncludedTerm)
+				kv.log("Save the states and dup table to Snapshot for lastIncluded index %d and term %d. (Prev State Size: %d, current Size: %d", lastIncludedIndex, lastIncludedTerm, prevStateSize, kv.persister.RaftStateSize())
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+
 	return kv
 }
