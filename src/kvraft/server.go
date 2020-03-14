@@ -15,13 +15,15 @@ import (
 )
 
 const Debug = 0
-const Log = 0
+
+var Log int = 0
 
 const commitLogFormat = "/tmp/server-commit-%d.log"
 const reqLogFormath = "/tmp/server-req-%d.log"
 
 // To log the server action, set Log=1 and call this function before all execution.
 func PrepareServerLogs(numServer int) {
+	Log = 1
 	for i := 0; i < numServer; i++ {
 		commitLogPath := fmt.Sprintf(commitLogFormat, i)
 		reqLogPath := fmt.Sprintf(reqLogFormath, i)
@@ -103,13 +105,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	reply.ClerkId = args.ClerkId
 	reply.CmdSeq = args.CmdSeq
 	kv.log("Receive Request %s. ", args.String())
-	kv.log("Attempt to Acquire the KV server Rlock in Get to submit")
 	kv.mu.RLock()
-	kv.log("Grab the kv server Rlock to submit")
 	defer func() {
 		kv.log("Reply with %s", reply.String())
 	}()
-	// kv.log("Grab the KV server lock in Get to submit")
 	if lastAppliedSeq, ok := kv.duplicatedTable[args.ClerkId]; ok && args.CmdSeq <= lastAppliedSeq {
 		// Suppose this get request is located at index N. But another cmd at N+1 modifies the same key.
 		// Even though lastAppliedSeq = N+2, we still satisfy linearizability
@@ -134,19 +133,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	var index, term int
 	var isLeader bool
-	if kv.maxraftstate < kv.persister.RaftStateSize() {
-		// If this server is leader, it might be in the minority partition.
-		// So that the appended logs can not be committed and snapshoted.
-		// Reject the request to avoid overloading the logs
-		reply.Err = ErrWrongLeader
-	}
 	if index, term, isLeader = kv.rf.Start(Op{Key: args.Key, Op: "Get", ClerkId: args.ClerkId, CmdSeq: args.CmdSeq}); !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
 
+	kv.mu.RLock()
+	defer kv.mu.RUnlock()
 	for {
-		kv.mu.RLock()
 		kv.log("Wait for the cmd for clerk %d, cmdSeq %d, raft index %d, term %d", args.ClerkId, args.CmdSeq, index, term)
 		kv.cond.Wait()
 		if lastAppliedSeq, ok := kv.duplicatedTable[args.ClerkId]; ok && args.CmdSeq <= lastAppliedSeq {
@@ -160,29 +154,24 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 			action := fmt.Sprintf("Reply Get key=[%s] val=[%s] for clerk %d cmdseq %d after raft index %d and term %d\n", args.Key, reply.Value, args.ClerkId, args.CmdSeq, kv.lastAppliedRaftIndex, kv.lastAppliedRaftTerm)
 			kv.WriteReqLog(action)
-			kv.mu.RUnlock()
 			kv.log("Cmd for clerk %d and cmdSeq %d has committed. RUnlock and return", args.ClerkId, args.CmdSeq)
 			return
 		} else if index <= kv.lastAppliedRaftIndex {
 			reply.Err = ErrWrongLeader
-			kv.mu.RUnlock()
 			kv.log("Cmd for clerk %d and cmdSeq %d fails. Raft Index bypasses", args.ClerkId, args.CmdSeq)
 			return
 		} else if term < kv.lastAppliedRaftTerm {
 			reply.Err = ErrWrongLeader
-			kv.mu.RUnlock()
 			kv.log("Cmd for clerk %d and cmdSeq %d fails. Raft Term bypasses", args.ClerkId, args.CmdSeq)
 			return
 		} else if term < kv.latestTerm {
-			// Change to leadership
+			// Detect the change of leadership
 			// This cmd will probably be committed by the leader of the new term.
-			// If it is, we ask the clerk to resend and hinge on the cmd de-deduplication.
+			// If so, we still ask the clerk to resend and hinge on the cmd de-deduplication.
 			reply.Err = ErrWrongLeader
-			kv.mu.RUnlock()
 			kv.log("Cmd for clerk %d and cmdSeq %d may fail. Change of leadership", args.ClerkId, args.CmdSeq)
 			return
 		}
-		kv.mu.RUnlock()
 	}
 }
 
@@ -210,13 +199,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.RUnlock()
 	kv.log("RUnlock the KV server lock in PutAppend before submit")
 
-	if kv.maxraftstate < kv.persister.RaftStateSize() {
-		// If this server is leader, it might be in the minority partition.
-		// So that the appended logs can not be committed and snapshoted.
-		// Reject the request to avoid overloading the logs
-		reply.Err = ErrWrongLeader
-	}
-
 	var index, term int
 	var isLeader bool
 	if index, term, isLeader = kv.rf.Start(Op{Key: args.Key, Op: args.Op, Value: args.Value, ClerkId: args.ClerkId, CmdSeq: args.CmdSeq}); !isLeader {
@@ -224,37 +206,33 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
+	kv.mu.RLock()
+	defer kv.mu.RUnlock()
 	for {
-		kv.mu.RLock()
 		kv.log("Wait for the cmd for clerk %d,  cmdSeq %d, raft index %d, term %d", args.ClerkId, args.CmdSeq, index, term)
 		kv.cond.Wait()
 		if lastAppliedSeq, ok := kv.duplicatedTable[args.ClerkId]; ok && args.CmdSeq <= lastAppliedSeq {
 			reply.Err = OK
 			action := fmt.Sprintf("Reply %s key=[%s] val=[%s] for clerk %d cmdseq %d after raft index %d and term %d\n", args.Op, args.Key, args.Value, args.ClerkId, args.CmdSeq, kv.lastAppliedRaftIndex, kv.lastAppliedRaftTerm)
 			kv.WriteReqLog(action)
-			kv.mu.RUnlock()
 			kv.log("Cmd for clerk %d and cmdSeq %d has committed. RUnlock and return", args.ClerkId, args.CmdSeq)
 			return
 		} else if index <= kv.lastAppliedRaftIndex {
 			reply.Err = ErrWrongLeader
-			kv.mu.RUnlock()
 			kv.log("Cmd for clerk %d and cmdSeq %d fails. Raft Index bypasses", args.ClerkId, args.CmdSeq)
 			return
 		} else if term < kv.lastAppliedRaftTerm {
 			reply.Err = ErrWrongLeader
-			kv.mu.RUnlock()
 			kv.log("Cmd for clerk %d and cmdSeq %d fails. Raft Term bypasses", args.ClerkId, args.CmdSeq)
 			return
 		} else if term < kv.latestTerm {
-			// Change to leadership
+			// Detect the change of leadership
 			// This cmd will probably be committed by the leader of the new term.
-			// If it is, we ask the clerk to resend and hinge on the cmd de-deduplication.
+			// If so, we still ask the clerk to resend and hinge on the cmd de-deduplication.
 			reply.Err = ErrWrongLeader
-			kv.mu.RUnlock()
 			kv.log("Cmd for clerk %d and cmdSeq %d may fail. Change of leadership", args.ClerkId, args.CmdSeq)
 			return
 		}
-		kv.mu.RUnlock()
 	}
 }
 
@@ -385,11 +363,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		for appliedMsg := range kv.applyCh {
 			// NOTE: the for loop is executed with holding rf.mu.
 			// Be careful to call any rf.Method() which also acquires the rf.mu lock, leading to the deadlock.
-			kv.log("Attempt to Acquire the KV server lock in applied routine")
-			// fmt.Printf("Attempt to Acquire the KV server lock in applied routine (Raft Server %d)\n", kv.rf.Me())
+			if kv.killed() {
+				break
+			}
 			kv.mu.Lock()
-			kv.log("Grab the KV server lock in applied routine")
-			// fmt.Printf("Grab the KV server lock in applied routine (Raft Server %d)\n", kv.rf.Me())
 			if appliedMsg.CommandIndex == 0 {
 				// Ignore the first empty raft log
 			} else if !appliedMsg.CommandValid {
@@ -437,25 +414,19 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 			}
 			kv.lastAppliedRaftIndex = appliedMsg.CommandIndex
 			kv.lastAppliedRaftTerm = appliedMsg.Term
-			kv.mu.Unlock()
 			kv.cond.Broadcast()
-			kv.log("Release the KV server lock in applied routine and make the broadcast")
-			// fmt.Printf("Release the KV server lock in applied routine (Raft Server %d)\n", kv.rf.Me())
+			kv.mu.Unlock()
 		} // end for
 	}()
 
 	go func() {
 		// Periodically poll to detect the leadership changes
-		for {
-			// fmt.Printf("Attempt to retrieve Raft State (Raft Server %d", kv.rf.Me())
+		for !kv.killed() {
 			latestTerm, _ := kv.rf.GetState()
-			// fmt.Printf("Has retrieved the raft. Attempt to Acquire the KV server lock in periodic poll (Raft Server %d)\n", kv.rf.Me())
 			kv.mu.Lock()
-			// fmt.Printf("Grab the KV server lock in periodic poll (Raft Server %d)\n", kv.rf.Me())
 			kv.latestTerm = latestTerm
 			kv.cond.Broadcast()
 			kv.mu.Unlock()
-			// fmt.Printf("Release the KV server lock in periodic poll (Raft Server %d)\n", kv.rf.Me())
 			// This is to in case some requests has submitted to raft and get committed before the RPC hanlders calls the wait()
 			// Suppose there is no further requests, this request will be blocked there.
 			// Hence, we periodically awake them up to test for condition.
@@ -465,7 +436,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	go func() {
 		// Periodically examine thr persisted states and save the snapshot if necessary.
-		for {
+		for !kv.killed() {
 			if prevStateSize := kv.persister.RaftStateSize(); 0 < kv.maxraftstate && kv.maxraftstate < prevStateSize {
 				w := new(bytes.Buffer)
 				e := labgob.NewEncoder(w)

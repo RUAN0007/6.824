@@ -51,13 +51,13 @@ func (ck *Clerk) Get(key string) (result string) {
 	for {
 		DPrintf("\n\n\nClerk %d sends request to server %d with request %s", ck.clerkID, ck.leader, args.String())
 		if ok := ck.servers[ck.leader].Call("KVServer.Get", &args, &reply); !ok {
+			DPrintf("Clerk %d Get Request %d on Server %d fails", ck.clerkID, ck.cmdSeq, ck.leader)
 			ck.leader = (ck.leader + 1) % len(ck.servers)
-			// DPrintf("Clerk %d Get Request %d on Server %d fails", ck.clerkID, ck.cmdSeq, ck.leader)
 		} else if reply.ClerkId != args.ClerkId || reply.CmdSeq != args.CmdSeq {
 			DPrintf("Detect the unmatched reply")
 		} else if reply.Err == ErrWrongLeader {
+			DPrintf("Clerk %d Get Request %d on Server %d encounters wrong leader", ck.clerkID, ck.cmdSeq, ck.leader)
 			ck.leader = (ck.leader + 1) % len(ck.servers)
-			// DPrintf("Clerk %d Get Request %d on Server %d encounters wrong leader", ck.clerkID, ck.cmdSeq, ck.leader)
 		} else if reply.Err == ErrNoKey {
 			DPrintf("Clerk %d Get Request %d on Server %d encounters no key. ", ck.clerkID, ck.cmdSeq, ck.leader)
 			result = ""
@@ -89,13 +89,13 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		DPrintf("\n\n\nClerk %d sends request to server %d with request %s", ck.clerkID, ck.leader, args.String())
 		if ok := ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply); !ok {
+			DPrintf("Clerk %d PutAppend Request %d on Server %d fails", ck.clerkID, ck.cmdSeq, ck.leader)
 			ck.leader = (ck.leader + 1) % len(ck.servers)
-			// DPrintf("Clerk %d PutAppend Request %d on Server %d fails", ck.clerkID, ck.cmdSeq, ck.leader)
 		} else if reply.ClerkId != args.ClerkId || reply.CmdSeq != args.CmdSeq {
 			DPrintf("Detect the unmatched reply")
 		} else if reply.Err == ErrWrongLeader {
+			DPrintf("Clerk %d PutAppend Request %d on Server %d encounters wrong leader", ck.clerkID, ck.cmdSeq, ck.leader)
 			ck.leader = (ck.leader + 1) % len(ck.servers)
-			// DPrintf("Clerk %d PutAppend Request %d on Server %d encounters wrong leader", ck.clerkID, ck.cmdSeq, ck.leader)
 		} else if reply.Err == ErrNoKey {
 			DPrintf("Clerk %d PutAppend Request %d on Server %d encounters no key. ", ck.clerkID, ck.cmdSeq, ck.leader)
 			panic("Should not reach here")

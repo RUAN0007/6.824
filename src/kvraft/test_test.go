@@ -1,20 +1,17 @@
 package kvraft
 
-import (
-	"fmt"
-	"io/ioutil"
-	"log"
-	"math/rand"
-	"strconv"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"testing"
-	"time"
-
-	"../models"
-	"../porcupine"
-)
+import "../porcupine"
+import "../models"
+import "testing"
+import "strconv"
+import "time"
+import "math/rand"
+import "log"
+import "strings"
+import "sync"
+import "sync/atomic"
+import "fmt"
+import "io/ioutil"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -676,39 +673,38 @@ func TestSnapshotRPC3B(t *testing.T) {
 
 // are the snapshots not too huge? 500 bytes is a generous bound for the
 // operations we're doing here.
-// func TestSnapshotSize3B(t *testing.T) {
-// 	const nservers = 3
-// 	maxraftstate := -1
-// 	// maxsnapshotstate := 500
-// 	cfg := make_config(t, nservers, false, maxraftstate)
-// 	defer cfg.cleanup()
+func TestSnapshotSize3B(t *testing.T) {
+	const nservers = 3
+	maxraftstate := 1000
+	maxsnapshotstate := 500
+	cfg := make_config(t, nservers, false, maxraftstate)
+	defer cfg.cleanup()
 
-// 	ck := cfg.makeClient(cfg.All())
+	ck := cfg.makeClient(cfg.All())
 
-// 	cfg.begin("Test: snapshot size is reasonable (3B)")
+	cfg.begin("Test: snapshot size is reasonable (3B)")
 
-// 	// for i := 0; i < 50; i++ {
-// 	for i := 0; i < 200; i++ {
-// 		Put(cfg, ck, "x", "0")
-// 		check(cfg, t, ck, "x", "0")
-// 		Put(cfg, ck, "x", "1")
-// 		check(cfg, t, ck, "x", "1")
-// 	}
+	for i := 0; i < 200; i++ {
+		Put(cfg, ck, "x", "0")
+		check(cfg, t, ck, "x", "0")
+		Put(cfg, ck, "x", "1")
+		check(cfg, t, ck, "x", "1")
+	}
 
-// check that servers have thrown away most of their log entries
-// sz := cfg.LogSize()
-// if sz > 2*maxraftstate {
-// 	t.Fatalf("logs were not trimmed (%v > 2*%v)", sz, maxraftstate)
-// }
+	// check that servers have thrown away most of their log entries
+	sz := cfg.LogSize()
+	if sz > 2*maxraftstate {
+		t.Fatalf("logs were not trimmed (%v > 2*%v)", sz, maxraftstate)
+	}
 
-// check that the snapshots are not unreasonably large
-// ssz := cfg.SnapshotSize()
-// if ssz > maxsnapshotstate {
-// 	t.Fatalf("snapshot too large (%v > %v)", ssz, maxsnapshotstate)
-// }
+	// check that the snapshots are not unreasonably large
+	ssz := cfg.SnapshotSize()
+	if ssz > maxsnapshotstate {
+		t.Fatalf("snapshot too large (%v > %v)", ssz, maxsnapshotstate)
+	}
 
-// cfg.end()
-// }
+	cfg.end()
+}
 
 func TestSnapshotRecover3B(t *testing.T) {
 	// Test: restarts, snapshots, one client (3B) ...

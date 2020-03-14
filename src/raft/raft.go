@@ -61,7 +61,8 @@ const (
 	instantTick             = 1  // if timeoutTicks=instantTick, an immediate timeout is triggered on the next tick.
 	electionTimeoutMinTicks = 40 // re-elect in a minimum of 400ms
 	electionTimeoutMaxTicks = 60 // re-elect in a maximum of 600ms
-	heartbeatTicks          = 15 // send heartbeat in 150ms
+	// heartbeatTicks          = 15 // send heartbeat in 150ms
+	heartbeatTicks = 5 // send heartbeat in 20ms
 )
 
 const (
@@ -172,13 +173,10 @@ func (rf *Raft) GetState() (int, bool) {
 	var isLeader bool
 	// Your code here (2A).
 
-	// // fmt.Printf("Attempt to grab the lock for GetState (Server %d)\n", rf.me)
 	rf.mu.Lock()
-	// // fmt.Printf("Grab the lock for GetState (Server %d)\n", rf.me)
 	term = rf.currentTerm
 	isLeader = rf.role == Leader
 	rf.mu.Unlock()
-	// // fmt.Printf("Release the lock for GetState (Server %d)\n", rf.me)
 	return term, isLeader
 }
 
@@ -298,12 +296,9 @@ func (args *InstallSnapshotReply) String() string {
 	return fmt.Sprintf("InstallSnapshotReply{Term: %d}", args.Term)
 }
 
-// Assume holding the  lock
+// Assume holding the lock
 func (rf *Raft) CommitWithLock(commitIndex int) {
-	// rf.mu.Lock()
-	// defer rf.mu.Unlock()
 	if rf.commitIdx < commitIndex {
-		// fmt.Printf("Update the commitIdx to %d\n", commitIndex)
 		rf.commitIdx = commitIndex
 	}
 	rf.commitCond.Broadcast()
@@ -355,12 +350,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
-	// fmt.Printf("Attempt to grab the AppendEntry lock (Server %d)\n", rf.me)
 	rf.mu.Lock()
-	// fmt.Printf("Grab the AppendEntry lock (Server %d)\n", rf.me)
 	defer func() {
 		rf.mu.Unlock()
-		// fmt.Printf("Release the AppendEntry lock (Server %d)\n", rf.me)
 	}()
 
 	baseIndex := rf.logs[0].Msg.CommandIndex
@@ -453,12 +445,9 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	// fmt.Printf("Attempt to grab the RequestVote lock (Server %d)\n", rf.me)
 	rf.mu.Lock()
-	// fmt.Printf("Grab the RequestVote lock (Server %d)\n", rf.me)
 	defer func() {
 		rf.mu.Unlock()
-		// fmt.Printf("Release the RequestVote lock (Server %d)\n", rf.me)
 	}()
 
 	beforeState := rf.String()
@@ -504,9 +493,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) onTimeout() {
-	// fmt.Printf("Attempt to grab the lock onTimeout (Server %d)\n", rf.me)
 	rf.mu.Lock()
-	// fmt.Printf("Grab the lock onTimeout (Server %d)\n", rf.me)
 
 	baseIndex := rf.logs[0].Msg.CommandIndex
 	if rf.role == Follower {
@@ -560,7 +547,6 @@ func (rf *Raft) onTimeout() {
 		atomic.StoreInt32(&rf.timeoutTicks, heartbeatTicks)
 
 		rf.mu.Unlock()
-		// fmt.Printf("Unlock to send AppendEntry request onTimeout (Server %d)\n", rf.me)
 		for i, args := range appendEntriesRequests {
 			go func(serverIndex int, args *AppendEntryArgs, beforeRole Role) {
 				reply := &AppendEntryReply{}
@@ -569,10 +555,8 @@ func (rf *Raft) onTimeout() {
 					return
 				}
 
-				// fmt.Printf("Attempt to grab the lock for AppendEntry reply (Server %d)\n", rf.me)
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				// fmt.Printf("Grab the lock for AppendEntry reply (Server %d)\n", rf.me)
 
 				baseIndex := rf.logs[0].Msg.CommandIndex // baseIndex may change on RPC reply
 				var actions []string
@@ -583,7 +567,6 @@ func (rf *Raft) onTimeout() {
 				} else if reply.Term > rf.currentTerm {
 					stepDownAction := rf.stepDownWithLock(reply.Term)
 					actions = append(actions, stepDownAction)
-					// panic("  Encounter an AppendEntry Reply with higher term. ")
 				} else if reply.Success { // reply.Term = rf.currentTerm for the following two cases
 					if rf.matchIndex[serverIndex] < args.PrevLogIndex+len(args.Entries) {
 						rf.matchIndex[serverIndex] = args.PrevLogIndex + len(args.Entries)
@@ -633,8 +616,6 @@ func (rf *Raft) onTimeout() {
 					actionStr += "\n\t" + action
 				}
 				rf.log("Receive from server %d with reply %s. Action: %s", serverIndex, reply.String(), actionStr)
-				// rf.mu.Unlock()
-				// fmt.Printf("Release the lock for AppendEntry reply (Server %d)\n", rf.me)
 
 			}(i, args, beforeRole)
 		}
@@ -647,10 +628,8 @@ func (rf *Raft) onTimeout() {
 					return
 				}
 
-				// fmt.Printf("Attempt to grab the lock for AppendEntry reply (Server %d)\n", rf.me)
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				// fmt.Printf("Grab the lock for AppendEntry reply (Server %d)\n", rf.me)
 
 				var actions []string
 				if beforeRole != rf.role || args.Term != rf.currentTerm {
@@ -692,7 +671,6 @@ func (rf *Raft) onTimeout() {
 		rf.persistWithLock()
 
 		rf.mu.Unlock()
-		// // fmt.Printf("Unlock to send RequestVote request onTimeout (Server %d)\n", rf.me)
 		votes := 1 // self-votes
 		for i, args := range requests {
 			go func(serverIndex int, args *RequestVoteArgs, beforeRole Role) {
@@ -701,9 +679,7 @@ func (rf *Raft) onTimeout() {
 				if ok := rf.peers[serverIndex].Call("Raft.RequestVote", args, reply); !ok {
 					return
 				}
-				// fmt.Printf("Attempt to grab the lock for RequestVote reply (Server %d)\n", rf.me)
 				rf.mu.Lock()
-				// fmt.Printf("Grab the lock for RequestVote reply (Server %d)\n", rf.me)
 				defer rf.mu.Unlock()
 
 				var actions []string
@@ -739,7 +715,6 @@ func (rf *Raft) onTimeout() {
 					actionStr += "\n\t" + action
 				}
 				rf.log("Receive from server %d with reply %s. Actions: %s", serverIndex, reply.String(), actionStr)
-				// fmt.Printf("Release the lock for RequestVote reply (Server %d)\n", rf.me)
 			}(i, args, beforeRole)
 		} // end for
 
@@ -807,12 +782,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	// fmt.Printf("Attempt to grab the lock to submit cmd (Server %d)\n", rf.me)
 	rf.mu.Lock()
-	// fmt.Printf("Grab the lock to submit cmd (Server %d)\n", rf.me)
 	defer func() {
 		rf.mu.Unlock()
-		// fmt.Printf("Release the lock to submit cmd (Server %d)\n", rf.me)
 	}()
 
 	firstEmptyLogIndex := rf.logLen()
@@ -827,7 +799,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 				Command:      command,
 				Term:         term,
 				CommandIndex: firstEmptyLogIndex}})
-		// // fmt.Printf("Server %d inserts to its log\n", rf.me)
 		rf.log("!!!!Accept cmd %v at index %d!!!!", command, firstEmptyLogIndex)
 	}
 	return firstEmptyLogIndex, term, isLeader
@@ -915,9 +886,6 @@ func (rf *Raft) saveSnapshotWithLock(snapshot []byte, lastIncludedIndex, lastInc
 	e2.Encode(lastIncludedIndex)
 	e2.Encode(lastIncludedTerm)
 	e2.Encode(snapshot)
-	// if err := e.Encode(snapshot); err != nil {
-	// 	panic("Fail to encode snapshot byte...")
-	// }
 	snapshotState := w2.Bytes()
 
 	// Note: persister will first persist snapshot state and then raft state
@@ -994,33 +962,27 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitCond = sync.NewCond(&rf.mu)
 
 	go func() {
-		for {
-			// fmt.Printf("Attempt to grab the lock during commit (Server %d)\n", rf.me)
+		for !rf.killed() {
 			rf.mu.Lock()
-			// fmt.Printf("Grab the lock during commit (Server %d)\n", rf.me)
 			for rf.commitIdx == rf.lastApplied {
 				rf.commitCond.Wait()
 			}
-			// fmt.Printf("Awake up by broadcast (Server %d) \n", rf.me)
 
 			from := rf.lastApplied + 1
 			to := rf.commitIdx
 			baseIndex := rf.logs[0].Msg.CommandIndex
 			rf.lastApplied = max(rf.lastApplied, baseIndex-1)
 			for rf.lastApplied < rf.commitIdx {
-				// fmt.Printf("Submit applied log %d (Server %d) \n", rf.lastApplied, rf.me)
 				rf.applyCh <- rf.logAt(rf.lastApplied + 1).Msg
-				// fmt.Printf("Finish submission applied log %d (Server %d) \n", rf.lastApplied, rf.me)
 				rf.lastApplied++
 			}
 			rf.log("Commits logs from %d to %d", from, to)
 			rf.mu.Unlock()
-			// fmt.Printf("Release the lock during commit (Server %d)\n", rf.me)
 		}
 	}()
 
 	go func() {
-		for {
+		for !rf.killed() {
 			if atomic.AddInt32(&rf.timeoutTicks, -1) == 0 {
 				rf.onTimeout() // either can be election or heartbeat timeout
 				if atomic.LoadInt32(&rf.timeoutTicks) == 0 {
