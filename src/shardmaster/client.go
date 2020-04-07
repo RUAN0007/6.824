@@ -4,14 +4,20 @@ package shardmaster
 // Shardmaster clerk.
 //
 
-import "../labrpc"
-import "time"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"log"
+	"math/big"
+	"time"
+
+	"../labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	clerkID int64
+	cmdSeq  int
 }
 
 func nrand() int64 {
@@ -24,12 +30,23 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.clerkID = nrand() % 100000
+	ck.cmdSeq = 0
 	// Your code here.
 	return ck
 }
 
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug > 0 {
+		log.Printf(format, a...)
+	}
+	return
+}
+
 func (ck *Clerk) Query(num int) Config {
 	args := &QueryArgs{}
+	args.CmdID.ClientID = ck.clerkID
+	args.CmdID.CmdSeq = ck.cmdSeq
 	// Your code here.
 	args.Num = num
 	for {
@@ -37,7 +54,9 @@ func (ck *Clerk) Query(num int) Config {
 		for _, srv := range ck.servers {
 			var reply QueryReply
 			ok := srv.Call("ShardMaster.Query", args, &reply)
-			if ok && reply.WrongLeader == false {
+			matched := args.CmdID.ClientID == reply.CmdID.ClientID && args.CmdID.CmdSeq == reply.CmdID.CmdSeq
+			if ok && reply.WrongLeader == false && matched {
+				ck.cmdSeq++
 				return reply.Config
 			}
 		}
@@ -49,13 +68,16 @@ func (ck *Clerk) Join(servers map[int][]string) {
 	args := &JoinArgs{}
 	// Your code here.
 	args.Servers = servers
-
+	args.CmdID.ClientID = ck.clerkID
+	args.CmdID.CmdSeq = ck.cmdSeq
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply JoinReply
 			ok := srv.Call("ShardMaster.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
+			matched := args.CmdID.ClientID == reply.CmdID.ClientID && args.CmdID.CmdSeq == reply.CmdID.CmdSeq
+			if ok && reply.WrongLeader == false && matched {
+				ck.cmdSeq++
 				return
 			}
 		}
@@ -67,13 +89,16 @@ func (ck *Clerk) Leave(gids []int) {
 	args := &LeaveArgs{}
 	// Your code here.
 	args.GIDs = gids
-
+	args.CmdID.ClientID = ck.clerkID
+	args.CmdID.CmdSeq = ck.cmdSeq
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply LeaveReply
 			ok := srv.Call("ShardMaster.Leave", args, &reply)
-			if ok && reply.WrongLeader == false {
+			matched := args.CmdID.ClientID == reply.CmdID.ClientID && args.CmdID.CmdSeq == reply.CmdID.CmdSeq
+			if ok && reply.WrongLeader == false && matched {
+				ck.cmdSeq++
 				return
 			}
 		}
@@ -87,12 +112,16 @@ func (ck *Clerk) Move(shard int, gid int) {
 	args.Shard = shard
 	args.GID = gid
 
+	args.CmdID.ClientID = ck.clerkID
+	args.CmdID.CmdSeq = ck.cmdSeq
 	for {
 		// try each known server.
 		for _, srv := range ck.servers {
 			var reply MoveReply
 			ok := srv.Call("ShardMaster.Move", args, &reply)
-			if ok && reply.WrongLeader == false {
+			matched := args.CmdID.ClientID == reply.CmdID.ClientID && args.CmdID.CmdSeq == reply.CmdID.CmdSeq
+			if ok && reply.WrongLeader == false && matched {
+				ck.cmdSeq++
 				return
 			}
 		}
