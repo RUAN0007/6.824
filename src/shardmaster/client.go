@@ -57,7 +57,19 @@ func (ck *Clerk) Query(num int) Config {
 			matched := args.CmdID.ClientID == reply.CmdID.ClientID && args.CmdID.CmdSeq == reply.CmdID.CmdSeq
 			if ok && reply.WrongLeader == false && matched {
 				ck.cmdSeq++
-				return reply.Config
+				// Copy the config from reply to avoid race condtion
+				result := Config{Num: reply.Config.Num}
+				for i := 0; i < NShards; i++ {
+					result.Shards[i] = reply.Config.Shards[i]
+				}
+				result.Groups = map[int][]string{}
+				for gid, serverNames := range reply.Config.Groups {
+					result.Groups[gid] = []string{}
+					for _, serverName := range serverNames {
+						result.Groups[gid] = append(result.Groups[gid], serverName)
+					}
+				}
+				return result
 			}
 		}
 		time.Sleep(100 * time.Millisecond)

@@ -125,11 +125,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.WriteReqLog(action)
 
 		kv.mu.RUnlock()
-		kv.log("Release the KV server lock in Get to submit")
 		return
 	}
 	kv.mu.RUnlock()
-	kv.log("Release the KV server lock in Get before raft submit")
 
 	var index, term int
 	var isLeader bool
@@ -183,9 +181,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	defer func() {
 		kv.log("Reply with %s", reply.String())
 	}()
-	kv.log("Attempt to Acquire the KV server Rlock in PutAppend to submit")
 	kv.mu.RLock()
-	kv.log("Grab the KV server Rlock in PutAppend to submit")
 	if lastAppliedSeq, ok := kv.duplicatedTable[args.ClerkId]; ok && args.CmdSeq <= lastAppliedSeq {
 		reply.Err = OK
 
@@ -193,11 +189,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.WriteReqLog(action)
 
 		kv.mu.RUnlock()
-		kv.log("Release the KV server lock in PutAppend for duplicates")
 		return
 	}
 	kv.mu.RUnlock()
-	kv.log("RUnlock the KV server lock in PutAppend before submit")
 
 	var index, term int
 	var isLeader bool

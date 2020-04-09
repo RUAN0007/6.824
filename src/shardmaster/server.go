@@ -55,6 +55,20 @@ type Op struct {
 	GID     int              // for MoveArgs
 }
 
+func (op *Op) String() string {
+	if op.Type == move {
+		return fmt.Sprintf("Op Type: %s, Shard: %d, Gid: %d", op.Type, op.Shard, op.GID)
+	} else if op.Type == join {
+		return fmt.Sprintf("Op Type: %s, Servers: %v", op.Type, op.Servers)
+	} else if op.Type == leave {
+		return fmt.Sprintf("Op Type: %s, Gids: %v", op.Type, op.GIDs)
+	} else if op.Type == query {
+		return fmt.Sprintf("Op Type: %s", op.Type)
+	} else {
+		panic("Unrecognized Cmd type " + op.Type.String())
+	}
+}
+
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
 	sm.log("Receive Request %s. ", args.String())
@@ -229,17 +243,19 @@ func (sm *ShardMaster) Raft() *raft.Raft {
 
 func (sm *ShardMaster) applyOpWithLock(op *Op) {
 	sm.duplicatedTable[op.ClerkId] = op.CmdSeq
-	lastConfig := sm.configs[len(sm.configs)-1]
-	newConfig := Config{}
-	newConfig.Num = lastConfig.Num + 1
-	newConfig.Groups = make(map[int][]string, 0)
 	defer func() {
 		if op.Type == query {
 			// sm.log("Apply Op %s. \n\tPrev Config: %s", op.Type.String(), lastConfig.String())
 		} else {
-			sm.log("Apply Op %s. \n\tPrev Config: %s \n\tNew Config: %s", op.Type.String(), lastConfig.String(), newConfig.String())
+			lastConfig := sm.configs[len(sm.configs)-2]
+			newConfig := sm.configs[len(sm.configs)-1]
+			sm.log("Apply Op %s. \n\tPrev Config: %s \n\tNew Config: %s", op.String(), lastConfig.String(), newConfig.String())
 		}
 	}()
+	lastConfig := sm.configs[len(sm.configs)-1]
+	newConfig := Config{}
+	newConfig.Num = lastConfig.Num + 1
+	newConfig.Groups = make(map[int][]string, 0)
 	if op.Type == move {
 		for gid, servers := range lastConfig.Groups {
 			newConfig.Groups[gid] = servers
@@ -253,95 +269,201 @@ func (sm *ShardMaster) applyOpWithLock(op *Op) {
 		}
 		sm.configs = append(sm.configs, newConfig)
 	} else if op.Type == leave {
-		// The # of assigned shard per live group
-		gidShardCount := map[int]int{}
-		// The id of the live group, which is not supposed to remove
-		// This slice will be later sorted based on the assigned shard number in previous confif
-		var liveGids []int
-		for gid, servers := range lastConfig.Groups {
-			live := true
+		lastGids := []int{} // will be sorted decreasingly based upon the number of owned shard in last config
+		lastGidShardCount := map[int]int{}
+		for gid := range lastConfig.Groups {
+			lastGids = append(lastGids, gid)
+		}
+		for i := 0; i < NShards; i++ {
+			gid := lastConfig.Shards[i]
+			if count, ok := lastGidShardCount[gid]; ok {
+				lastGidShardCount[gid] = count + 1
+			} else {
+				lastGidShardCount[gid] = 1
+			}
+		}
+		sort.Slice(lastGids, func(i, j int) bool {
+			gidI := lastGids[i]
+			gidJ := lastGids[j]
+			if lastGidShardCount[gidI] > lastGidShardCount[gidJ] {
+				return true
+			} else if lastGidShardCount[gidI] == lastGidShardCount[gidJ] {
+				return gidI > gidJ
+			} else {
+				return false
+			}
+		})
+
+		newGids := []int{}          // it is similarly sorted above as it is appended in the iteration order of lastGids
+		newGidMap := map[int]bool{} // to test for presence
+
+		for _, gid := range lastGids {
+			serverNames := lastConfig.Groups[gid]
+			left := false
 			for _, leftGid := range op.GIDs {
 				if gid == leftGid {
-					live = false
+					left = true
 					break
 				} // end if
 			} // end for leftGid
 
-			if live {
-				gidShardCount[gid] = 0
-				newConfig.Groups[gid] = servers
-				liveGids = append(liveGids, gid)
+			if !left {
+				newGids = append(newGids, gid)
+				newGidMap[gid] = true
+				newConfig.Groups[gid] = []string{}
+				for _, serverName := range serverNames {
+					newConfig.Groups[gid] = append(newConfig.Groups[gid], serverName)
+				}
 			}
 		} // end for gid
 
-		for _, gid := range lastConfig.Shards {
-			if _, ok := gidShardCount[gid]; ok {
-				gidShardCount[gid]++
+		newShards := [NShards]int{}
+		if len(newGids) == 0 {
+			// All previous have been removed.
+			for i := 0; i < NShards; i++ {
+				newShards[i] = 0
+			}
+		} else {
+			newGidShardCount := map[int]int{}
+			for _, gid := range newGids {
+				newGidShardCount[gid] = 0
+			}
+
+			// Note: since we init the shardCount in round robin manner,
+			// the starting gids are supposed to assign more shards.
+			// Since the starting gids own more shards also in previous config, we ensure that the number of the leftover gid will own more or the same shards when compared with current config.
+			// Without this sorting guarantee and suppose the number of group is always greater than the shard count, it might occur that gid is assigned 1 shard in previous config but assigned 0 in new config, which introduce unnecessary migration.
+			for i := 0; i < NShards; i++ {
+				newGidShardCount[newGids[i%len(newGids)]]++
+			}
+
+			// firstly preserve the shard assignment if the owned group is not removed
+			for i := 0; i < NShards; i++ {
+				if _, ok := newGidMap[lastConfig.Shards[i]]; ok {
+					newShards[i] = lastConfig.Shards[i]
+					newGidShardCount[newShards[i]]--
+				}
+			}
+
+			// then assign the remaining shard to gid whose shard count is not 0
+			for i := 0; i < NShards; i++ {
+				if newShards[i] == 0 { //  unassigned shard
+					var assignedGid int
+					for _, gid := range newGids {
+						if 0 < newGidShardCount[gid] {
+							assignedGid = gid
+							break
+						}
+					} // end for
+					newShards[i] = assignedGid
+					newGidShardCount[assignedGid]--
+				}
+			} // end for
+			for gid, shardCount := range newGidShardCount {
+				if shardCount > 0 {
+					panic(fmt.Sprintf("Gid %d has remaining unassigned shards. NewGidShardCount: %v", gid, newGidShardCount))
+				}
+			}
+		} // if len(newGids) == 0
+		newConfig.Shards = newShards
+		sm.configs = append(sm.configs, newConfig)
+	} else if op.Type == join {
+		var prevGids []int
+
+		lastGidShardCount := map[int]int{}
+		for gid := range lastConfig.Groups {
+			prevGids = append(prevGids, gid)
+		}
+		for i := 0; i < NShards; i++ {
+			if gid := lastConfig.Shards[i]; gid == 0 {
+				continue
+			} else if count, ok := lastGidShardCount[gid]; ok {
+				lastGidShardCount[gid] = count + 1
+			} else {
+				lastGidShardCount[gid] = 1
 			}
 		}
 
-		sort.Slice(liveGids, func(i, j int) bool {
-			return gidShardCount[liveGids[i]] < gidShardCount[liveGids[j]]
-		})
-		i := 0
-		for shardId, gid := range lastConfig.Shards {
-			if _, ok := gidShardCount[gid]; ok {
-				newConfig.Shards[shardId] = gid
-			} else if len(liveGids) == 0 {
-				newConfig.Shards[shardId] = 0
+		// The sorted reason is similar as above
+		sort.Slice(prevGids, func(i, j int) bool {
+			gidI := prevGids[i]
+			gidJ := prevGids[j]
+			if lastGidShardCount[gidI] > lastGidShardCount[gidJ] {
+				return true
+			} else if lastGidShardCount[gidI] == lastGidShardCount[gidJ] {
+				return gidI > gidJ
 			} else {
-				// schedule the obsolete shard to the live group
-				// with the min # of assigned shard.
-				// Do it in round robin manner for faireness
-				newConfig.Shards[shardId] = liveGids[i%len(liveGids)]
-				i++
+				return false
 			}
-		} // end for
+		})
 
-		sm.configs = append(sm.configs, newConfig)
-	} else if op.Type == join {
-		// the assigned shard for each prevGid
-		gidShardCount := map[int]int{}
-		var prevGids []int
 		var newGids []int
-		for gid, servers := range lastConfig.Groups {
-			gidShardCount[gid] = 0
-			newConfig.Groups[gid] = servers
-			prevGids = append(prevGids, gid)
+		for _, gid := range prevGids {
+			newConfig.Groups[gid] = nil
+			for _, serverName := range lastConfig.Groups[gid] {
+				newConfig.Groups[gid] = append(newConfig.Groups[gid], serverName)
+			}
+			newGids = append(newGids, gid) // to be appended laye
 		} // end for gid
 
-		for gid, servers := range op.Servers {
+		var joinedGids []int
+		for gid, serverNames := range op.Servers {
 			if _, ok := newConfig.Groups[gid]; ok {
 				panic(fmt.Sprintf("Joined group %d already exists", gid))
 			}
-			newConfig.Groups[gid] = servers
-			newGids = append(newGids, gid)
-		}
-		for shardId, gid := range lastConfig.Shards {
-			gidShardCount[gid]++
-			newConfig.Shards[shardId] = gid
-		}
-
-		sort.Slice(prevGids, func(i, j int) bool {
-			return gidShardCount[prevGids[i]] > gidShardCount[prevGids[j]]
-		}) // preGids are sorted based upon the assigned shard count in DECREASING order.
-
-		rescheduledShardCount := NShards / len(newConfig.Groups) * len(op.Servers)
-
-		// Shed the shard from gid with the max # of shards to the new group in round robin manner
-		for i := 0; i < rescheduledShardCount; i++ {
-			fromGid := 0
-			if 0 < len(prevGids) {
-				fromGid = prevGids[i%len(prevGids)]
+			newConfig.Groups[gid] = nil
+			for _, serverName := range serverNames {
+				newConfig.Groups[gid] = append(newConfig.Groups[gid], serverName)
 			}
-			toGid := newGids[i%len(newGids)]
-			for shardID, gid := range newConfig.Shards {
-				if gid == fromGid {
-					newConfig.Shards[shardID] = toGid
-					break
-				} // if
-			} // end for
+			joinedGids = append(joinedGids, gid)
 		}
+		// Sort the joined gids determinisitcally so that each replica will not diverge
+		sort.Slice(joinedGids, func(i, j int) bool {
+			return joinedGids[i] < joinedGids[j]
+		})
+
+		newGids = append(newGids, joinedGids...)
+
+		newShards := [NShards]int{}
+		newGidShardCount := map[int]int{}
+		for _, gid := range newGids {
+			newGidShardCount[gid] = 0
+		}
+		for i := 0; i < NShards; i++ {
+			newGidShardCount[newGids[i%len(newGids)]]++
+		}
+
+		// firstly, assign the shard to previous gid if its expected shard count is not 0 under current config.
+		for i := 0; i < NShards; i++ {
+			if lastConfig.Shards[i] == 0 {
+				continue
+			} else if gid := lastConfig.Shards[i]; 0 < newGidShardCount[gid] {
+				newShards[i] = gid
+				newGidShardCount[gid]--
+			}
+		}
+
+		for i := 0; i < NShards; i++ {
+			if newShards[i] == 0 { //  unassigned shard
+				var assignedGid int
+				for _, gid := range newGids {
+					if 0 < newGidShardCount[gid] {
+						assignedGid = gid
+						break
+					}
+				} // end for
+				newShards[i] = assignedGid
+				newGidShardCount[assignedGid]--
+			}
+		} // end for
+
+		for gid, shardCount := range newGidShardCount {
+			if shardCount > 0 {
+				panic(fmt.Sprintf("Gid %d has remaining unassigned shards. ", gid))
+			}
+		}
+
+		newConfig.Shards = newShards
 		sm.configs = append(sm.configs, newConfig)
 	} else if op.Type == query {
 		// do nothing

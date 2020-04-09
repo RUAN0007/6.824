@@ -62,7 +62,7 @@ const (
 	electionTimeoutMinTicks = 40 // re-elect in a minimum of 400ms
 	electionTimeoutMaxTicks = 60 // re-elect in a maximum of 600ms
 	// heartbeatTicks          = 15 // send heartbeat in 150ms
-	heartbeatTicks = 5 // send heartbeat in 20ms
+	heartbeatTicks = 5 // send heartbeat in 50ms
 )
 
 const (
@@ -537,7 +537,11 @@ func (rf *Raft) onTimeout() {
 					LeaderCommit: rf.commitIdx,
 				}
 				if firstEmptyLogIndex := rf.logLen(); rf.nextIndex[i] < firstEmptyLogIndex {
-					appendEntriesRequests[i].Entries = rf.logs[rf.nextIndex[i]-baseIndex:]
+					// Use this way to avoid race condition during rpc call.
+					for idx := rf.nextIndex[i] - baseIndex; idx < len(rf.logs); idx++ {
+						appendEntriesRequests[i].Entries = append(appendEntriesRequests[i].Entries, rf.logs[idx])
+					}
+					// appendEntriesRequests[i].Entries = rf.logs[rf.nextIndex[i]-baseIndex:]
 				}
 
 			}
