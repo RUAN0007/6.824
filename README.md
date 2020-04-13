@@ -1,5 +1,5 @@
 # Overview
-This repo includes my solution to the four lab assignments of [MIT 6.814 Distributed Systems Spring 2020](https://pdos.csail.mit.edu/6.824/index.html). All test cases are reliably passed, including non-credit challenges in Lab 4b. 
+This repo includes my solution to the four lab assignments of [MIT 6.824 Distributed Systems Spring 2020](https://pdos.csail.mit.edu/6.824/index.html). All test cases are reliably passed, including non-credit challenges in Lab 4b. 
 
 A few words about my design for Lab 4b, the sharded key-value storage with dynamic migration capability. 
 * Each leader replica (as long as it believes itself to be a leader) periodically (for every 100ms) examimes whether it has unmigrated or unremoved shards. If not, it queries the shardmaster for Config C+1 given its current config C. If there exists Config C+1, the leader broadcasts this new Config for Raft consensus as an Op. 
